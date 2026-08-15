@@ -3,9 +3,9 @@
 const crypto = require("node:crypto");
 const { trustedNimbusPublicKeys } = require("./keys");
 
-const REFERENCE_TYPE = "cresting-clouds-bootstrap";
+const REFERENCE_TYPE = "cresting-clouds-steam";
 const REFERENCE_VERSION = 1;
-const REFERENCE_AUDIENCE = "cresting-clouds-bootstrap";
+const REFERENCE_AUDIENCE = "cresting-clouds-steam";
 const CLOCK_SKEW_SECONDS = 60;
 const MAX_REFERENCE_BYTES = 32 * 1024;
 const MAX_LIFETIME_SECONDS = 10 * 60;
@@ -141,4 +141,3 @@ module.exports = {
   REFERENCE_VERSION,
   verifyReference,
 };
-

@@ -1,4 +1,4 @@
-# Cresting Clouds Bootstrap
+# Cresting Clouds Steam
 
 Public GitHub Action used by the Cresting Clouds customer workflow.
 
@@ -10,7 +10,7 @@ package.
 
 Authorization grants are staged as one temporary `grant.json` file, uploaded by
 GitHub's pinned official artifact action with one-day retention, and removed in
-an unconditional cleanup step. The bootstrap process never receives or exports
+an unconditional cleanup step. The Steam process never receives or exports
 GitHub's internal artifact-service credential.
 
 The action contains only public verification keys and generic transport code.
@@ -22,14 +22,14 @@ private signing key, entitlement logic, or a customer credential.
 Use the protected `main` branch as the stable customer reference:
 
 ```yaml
-- uses: Cresting-Clouds/bootstrap@main
+- uses: Cresting-Clouds/steam@main
   with:
     ref: ${{ inputs.ref }}
   env:
     ALL_SECRETS_JSON: ${{ toJSON(secrets) }}
 ```
 
-Customer workflows intentionally consume reviewed Bootstrap changes without a
+Customer workflows intentionally consume reviewed Steam changes without a
 workflow-file update. `main` is therefore a live customer execution boundary.
 Before this reference is enabled, the branch must be protected; every change
 must require review and passing tests; and force-pushes must be disabled.
@@ -41,13 +41,13 @@ and trust registration are managed by Cresting Clouds.
 
 When Nimbus development or preview deployments use Vercel deployment
 protection, the customer repository can retain the existing
-`NIMBUS_VERCEL_BYPASS` secret. Bootstrap reads only that field from
+`NIMBUS_VERCEL_BYPASS` secret. Steam reads only that field from
 `ALL_SECRETS_JSON`, accepts either the raw value or the established
 `x-vercel-protection-bypass=...` query-fragment form, masks it before use, and
 forwards it only on the Nimbus-signed runtime redemption request. The value is
 never written to disk or included in action outputs.
 
-After redemption, Bootstrap passes the signed callback origin and masked bypass
+After redemption, Steam passes the signed callback origin and masked bypass
 to the downloaded runtime process. This keeps environment routing out of the
 customer workflow while ensuring every Zephyr callback returns to the Nimbus
 deployment that issued the one-time reference.

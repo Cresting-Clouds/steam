@@ -19,9 +19,9 @@ function sign(payload, header = { alg: "RS256", kid: keyId, typ: "CCREF" }, key 
 
 function runtimePayload(overrides = {}) {
   return {
-    type: "cresting-clouds-bootstrap",
+    type: "cresting-clouds-steam",
     version: 1,
-    aud: "cresting-clouds-bootstrap",
+    aud: "cresting-clouds-steam",
     purpose: "runtime",
     jti: "ticket-12345678",
     iat: Math.floor(now / 1000) - 5,

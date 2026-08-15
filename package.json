@@ -1,8 +1,8 @@
 {
-  "name": "@cresting-clouds/bootstrap",
+  "name": "@cresting-clouds/steam",
   "version": "1.0.0",
   "private": true,
-  "description": "Verified runtime bootstrap for Cresting Clouds customer workflows",
+  "description": "Verified Steam runtime for Cresting Clouds customer workflows",
   "license": "MIT",
   "scripts": {
     "build": "esbuild src/index.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/index.js --minify && node -e \"const fs=require('node:fs');const file='dist/index.js';fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace(/[ \\\\t]+$/gm,''));\"",

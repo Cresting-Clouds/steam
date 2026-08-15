@@ -43,7 +43,7 @@ function runtimeResponse() {
 }
 
 test("cleans workspace contents and recreates the directory for post actions", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "bootstrap-cleanup-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "steam-cleanup-test-"));
   const workspace = path.join(root, "customer", "repository");
   await fs.mkdir(path.join(workspace, "nested"), { recursive: true });
   await fs.writeFile(path.join(workspace, "runtime.txt"), "runtime\n");
@@ -58,7 +58,7 @@ test("cleans workspace contents and recreates the directory for post actions", a
 });
 
 test("clones from the surviving workspace parent after deleting the checkout", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "bootstrap-clone-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "steam-clone-test-"));
   const workspace = path.join(root, "customer", "repository");
   await fs.mkdir(workspace, { recursive: true });
   await fs.writeFile(path.join(workspace, "stale.txt"), "stale\n");
@@ -238,7 +238,7 @@ test("fails closed when the inherited secret bundle is malformed", () => {
 });
 
 test("stages only the signed encrypted reference for the workflow uploader", async () => {
-  const runnerTemp = await fs.mkdtemp(path.join(os.tmpdir(), "bootstrap-test-"));
+  const runnerTemp = await fs.mkdtemp(path.join(os.tmpdir(), "steam-test-"));
   try {
     const staged = await stageEncryptedGrant({
       reference: "signed.encrypted.reference",
@@ -265,12 +265,12 @@ test("delegates grant upload to GitHub's pinned action and always cleans the sta
   const source = await fs.readFile(path.join(__dirname, "..", "src", "index.js"), "utf8");
   const packageJson = JSON.parse(await fs.readFile(path.join(__dirname, "..", "package.json"), "utf8"));
 
-  assert.match(action, /id: bootstrap/);
-  assert.match(action, /if: \$\{\{ steps\.bootstrap\.outputs\.purpose == 'vscode-auth' \}\}/);
+  assert.match(action, /id: steam/);
+  assert.match(action, /if: \$\{\{ steps\.steam\.outputs\.purpose == 'vscode-auth' \}\}/);
   assert.match(action, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
   assert.match(action, /retention-days: 1/);
   assert.match(action, /if-no-files-found: error/);
-  assert.match(action, /if: \$\{\{ always\(\) && steps\.bootstrap\.outputs\.grant-root != '' \}\}/);
+  assert.match(action, /if: \$\{\{ always\(\) && steps\.steam\.outputs\.grant-root != '' \}\}/);
   assert.match(action, /"\$RUNNER_TEMP_ROOT"\/cresting-clouds-grant-\*/);
   assert.doesNotMatch(source, /DefaultArtifactClient|@actions\/artifact/);
   assert.equal(packageJson.dependencies["@actions/artifact"], undefined);
