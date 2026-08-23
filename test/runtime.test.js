@@ -190,22 +190,38 @@ test("normalizes the established query-fragment bypass secret", async () => {
   assert.equal(runtime.callbackSecret, "customer/bypass+secret");
 });
 
-test("passes only the signed callback context into the Zephyr process", async () => {
+test("passes the redeemed customer credential and signed callback context into Zephyr", async () => {
   const commands = [];
-  await executeZephyr({
-    runtime: {
-      heartbeatId: "heartbeat-123",
-      callbackHost: "https://nimbus.example.invalid",
-      callbackSecret: "customer-bypass-secret",
-    },
-    workspace: "/tmp/customer-workspace",
-    zephyrDir: "/tmp/zephyr-runtime",
-    runCommand: async (command, args, options) => commands.push({ command, args, options }),
-  });
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousGhToken = process.env.GH_TOKEN;
+  process.env.GITHUB_TOKEN = "restricted-actions-token";
+  process.env.GH_TOKEN = "restricted-actions-token";
+  try {
+    await executeZephyr({
+      runtime: {
+        heartbeatId: "heartbeat-123",
+        customerToken: "temporary-customer-token-value",
+        callbackHost: "https://nimbus.example.invalid",
+        callbackSecret: "customer-bypass-secret",
+      },
+      workspace: "/tmp/customer-workspace",
+      zephyrDir: "/tmp/zephyr-runtime",
+      runCommand: async (command, args, options) => commands.push({ command, args, options }),
+    });
+  } finally {
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
+  }
 
   assert.equal(commands.length, 2);
+  assert.equal(commands[0].options.env.GITHUB_TOKEN, "restricted-actions-token");
+  assert.equal(commands[0].options.env.GH_TOKEN, "restricted-actions-token");
   assert.deepEqual(commands[1].args, ["/tmp/zephyr-runtime/run.js"]);
   assert.equal(commands[1].options.cwd, "/tmp/customer-workspace");
+  assert.equal(commands[1].options.env.GITHUB_TOKEN, "temporary-customer-token-value");
+  assert.equal(commands[1].options.env.GH_TOKEN, "temporary-customer-token-value");
   assert.equal(
     commands[1].options.env.CRESTING_CLOUDS_RUNTIME_HOST,
     "https://nimbus.example.invalid",
