@@ -224,6 +224,12 @@ async function executeZephyr({ runtime, workspace, zephyrDir, runCommand = run }
     cwd: workspace,
     env: {
       ...process.env,
+      // The workflow GITHUB_TOKEN can be configured to forbid pull-request
+      // creation even when the job requests pull-requests: write. Nimbus has
+      // already authenticated and returned a short-lived customer installation
+      // token, so keep every Zephyr GitHub mutation on that same credential.
+      GITHUB_TOKEN: runtime.customerToken,
+      GH_TOKEN: runtime.customerToken,
       CRESTING_CLOUDS_RUNTIME_HOST: runtime.callbackHost,
       CRESTING_CLOUDS_RUNTIME_SECRET: runtime.callbackSecret || "",
       HEARTBEAT_ID: runtime.heartbeatId,
