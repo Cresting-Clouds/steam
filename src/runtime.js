@@ -8,6 +8,10 @@ const tar = require("tar");
 
 const RUNTIME_SCHEMA = "cresting-clouds-runtime/v1";
 const GRANT_SCHEMA = "cresting-clouds-vscode-grant/v1";
+const SALESFORCE_RESULT_SCHEMA = "cresting-clouds-salesforce-operation-result/v1";
+const SALESFORCE_RESULT_FILE = "salesforce-operation-result-v1.json";
+const SALESFORCE_RESULT_ARTIFACT = "cresting-clouds-salesforce-operation-result";
+const SALESFORCE_RESULT_MAX_BYTES = 64 * 1024 * 1024;
 const GITHUB_ARCHIVE_HOSTS = new Set([
   "codeload.github.com",
   "github.com",
@@ -95,6 +99,168 @@ async function stageEncryptedGrant({ reference, payload, runnerTemp }) {
     await fs.rm(root, { recursive: true, force: true });
     throw error;
   }
+}
+
+function positiveRunNumber(value, errorCode) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error(errorCode);
+  return number;
+}
+
+function salesforceResultArtifactName(runId, runAttempt) {
+  positiveRunNumber(runId, "invalid_salesforce_result_run_id");
+  positiveRunNumber(runAttempt, "invalid_salesforce_result_run_attempt");
+  return SALESFORCE_RESULT_ARTIFACT;
+}
+
+async function stageSalesforceResultArtifact({ runnerTemp, runId, runAttempt }) {
+  const numericRunId = positiveRunNumber(runId, "invalid_salesforce_result_run_id");
+  const numericRunAttempt = positiveRunNumber(runAttempt, "invalid_salesforce_result_run_attempt");
+  const root = await fs.mkdtemp(path.join(runnerTemp, "cresting-clouds-salesforce-result-"));
+  await fs.chmod(root, 0o700);
+  return {
+    artifactName: salesforceResultArtifactName(numericRunId, numericRunAttempt),
+    file: path.join(root, SALESFORCE_RESULT_FILE),
+    root,
+  };
+}
+
+function safeRepositoryRelativePath(value) {
+  if (typeof value !== "string" || !value || value.includes("\\")) return false;
+  const normalized = path.posix.normalize(value);
+  return !path.posix.isAbsolute(normalized) && normalized !== ".." && !normalized.startsWith("../");
+}
+
+function validateSortedLines(value) {
+  if (!Array.isArray(value)) return false;
+  let previous = 0;
+  for (const entry of value) {
+    if (!Number.isSafeInteger(entry) || entry <= previous) return false;
+    previous = entry;
+  }
+  return true;
+}
+
+function validateCoverageEntries(value) {
+  if (!Array.isArray(value)) return false;
+  return value.every(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    if (!new Set(["ApexClass", "ApexTrigger"]).has(entry.type)) return false;
+    if (!validateSortedLines(entry.coveredLines) || !validateSortedLines(entry.uncoveredLines)) return false;
+    if (typeof entry.coveredLinesAvailable !== "boolean") return false;
+    if (entry.path !== undefined) {
+      if (!safeRepositoryRelativePath(entry.path)) return false;
+      if (typeof entry.source !== "string") {
+        if (entry.source !== undefined || typeof entry.sourceOmitted !== "string" || !entry.sourceOmitted) {
+          return false;
+        }
+      }
+    } else if (entry.source !== undefined) {
+      return false;
+    }
+    return true;
+  });
+}
+
+async function validateSalesforceResultArtifact({
+  staged,
+  repository,
+  zephyrSha,
+  zephyrSourceSha,
+  runId,
+  runAttempt,
+}) {
+  let stat;
+  try {
+    stat = await fs.lstat(staged.file);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("invalid_salesforce_result_file");
+  if (stat.size <= 0 || stat.size > SALESFORCE_RESULT_MAX_BYTES) {
+    throw new Error("invalid_salesforce_result_size");
+  }
+  if ((stat.mode & 0o077) !== 0) throw new Error("insecure_salesforce_result_permissions");
+
+  const numericRunId = positiveRunNumber(runId, "invalid_salesforce_result_run_id");
+  const numericRunAttempt = positiveRunNumber(runAttempt, "invalid_salesforce_result_run_attempt");
+  let document;
+  try {
+    document = JSON.parse(await fs.readFile(staged.file, "utf8"));
+  } catch {
+    throw new Error("invalid_salesforce_result_json");
+  }
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    throw new Error("invalid_salesforce_result_document");
+  }
+  if (document.schema !== SALESFORCE_RESULT_SCHEMA || document.schemaVersion !== 1) {
+    throw new Error("unsupported_salesforce_result_schema");
+  }
+  if (document.artifactName !== staged.artifactName ||
+      document.artifactName !== salesforceResultArtifactName(numericRunId, numericRunAttempt)) {
+    throw new Error("salesforce_result_artifact_name_mismatch");
+  }
+  if (document.repository?.fullName !== repository ||
+      document.workflow?.runId !== numericRunId ||
+      document.workflow?.runAttempt !== numericRunAttempt) {
+    throw new Error("salesforce_result_context_mismatch");
+  }
+  if (!new Set(["success", "failure"]).has(document.conclusion) ||
+      !new Set(["success", "failure"]).has(document.pipeline?.conclusion) ||
+      typeof document.timestamps?.completedAt !== "string" || !document.timestamps.completedAt) {
+    throw new Error("nonterminal_salesforce_result");
+  }
+  if (!SAFE_SHA.test(String(zephyrSha || "")) || document.producer?.runtimeSha !== zephyrSha) {
+    throw new Error("salesforce_result_producer_mismatch");
+  }
+  const sourceSha = String(zephyrSourceSha || zephyrSha || "");
+  if (!SAFE_SHA.test(sourceSha) ||
+      document.producer?.sha !== sourceSha ||
+      document.producer?.sourceSha !== sourceSha) {
+    throw new Error("salesforce_result_source_provenance_mismatch");
+  }
+  const expectedRunUrl = `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}/actions/runs/${numericRunId}` +
+    (numericRunAttempt > 1 ? `/attempts/${numericRunAttempt}` : "");
+  if (document.workflow?.runUrl !== expectedRunUrl) throw new Error("salesforce_result_run_url_mismatch");
+  const snapshot = document.tested_snapshot;
+  if (snapshot?.strategy !== "base_plus_head_merge_worktree" ||
+      !SAFE_SHA.test(String(snapshot?.base_sha || "")) ||
+      !SAFE_SHA.test(String(snapshot?.head_sha || "")) ||
+      !SAFE_SHA.test(String(snapshot?.tree_sha || ""))) {
+    throw new Error("invalid_salesforce_result_tested_snapshot");
+  }
+  if (document.source?.sha !== snapshot.head_sha || document.target?.sha !== snapshot.base_sha) {
+    throw new Error("salesforce_result_revision_mismatch");
+  }
+  if (!validateCoverageEntries(document.normalized?.codeCoverage)) {
+    throw new Error("invalid_salesforce_result_coverage");
+  }
+  return true;
+}
+
+async function resolveZephyrSourceSha({ zephyrDir, runtimeSha }) {
+  if (!SAFE_SHA.test(String(runtimeSha || ""))) throw new Error("invalid_runtime_sha");
+  const provenanceFile = path.join(zephyrDir, "zephyr-runtime-provenance.json");
+  let stat;
+  try {
+    stat = await fs.lstat(provenanceFile);
+  } catch (error) {
+    if (error?.code === "ENOENT") return runtimeSha;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > 64 * 1024) {
+    throw new Error("invalid_runtime_provenance_file");
+  }
+  let provenance;
+  try {
+    provenance = JSON.parse(await fs.readFile(provenanceFile, "utf8"));
+  } catch {
+    throw new Error("invalid_runtime_provenance_json");
+  }
+  const sourceSha = String(provenance?.source_sha || "").toLowerCase();
+  if (!SAFE_SHA.test(sourceSha)) throw new Error("invalid_runtime_source_sha");
+  return sourceSha;
 }
 
 function readDeploymentProtectionBypass(secretsJson) {
@@ -215,7 +381,15 @@ async function extractRuntime(archivePath, destination) {
   await fs.access(path.join(destination, "package-lock.json"));
 }
 
-async function executeZephyr({ runtime, workspace, zephyrDir, startedFile, runCommand = run }) {
+async function executeZephyr({
+  runtime,
+  workspace,
+  zephyrDir,
+  startedFile,
+  salesforceResultFile,
+  zephyrSourceSha,
+  runCommand = run,
+}) {
   await runCommand("bun", ["install", "--frozen-lockfile", "--production"], {
     cwd: zephyrDir,
     env: { ...process.env, CI: "true" },
@@ -233,6 +407,9 @@ async function executeZephyr({ runtime, workspace, zephyrDir, startedFile, runCo
       CRESTING_CLOUDS_RUNTIME_HOST: runtime.callbackHost,
       CRESTING_CLOUDS_RUNTIME_SECRET: runtime.callbackSecret || "",
       CRESTING_CLOUDS_RUNTIME_STARTED_FILE: startedFile || "",
+      CRESTING_CLOUDS_SALESFORCE_RESULT_FILE: salesforceResultFile || "",
+      CRESTING_CLOUDS_ZEPHYR_SHA: runtime.zephyrSha,
+      CRESTING_CLOUDS_ZEPHYR_SOURCE_SHA: zephyrSourceSha || runtime.zephyrSha,
       HEARTBEAT_ID: runtime.heartbeatId,
     },
   });
@@ -344,7 +521,15 @@ async function cleanupRuntime({ workspace, tempRoot }) {
   await cleanupWorkspace(workspace);
 }
 
-async function runRuntime({ reference, payload, core, fetchImpl = fetch, runCommand = run }) {
+async function runRuntime({
+  reference,
+  payload,
+  core,
+  salesforceResultFile,
+  onRuntimeRedeemed,
+  fetchImpl = fetch,
+  runCommand = run,
+}) {
   const runnerTemp = process.env.RUNNER_TEMP || os.tmpdir();
   const workspace = process.env.GITHUB_WORKSPACE;
   if (!workspace || !path.isAbsolute(workspace)) throw new Error("missing_github_workspace");
@@ -360,7 +545,24 @@ async function runRuntime({ reference, payload, core, fetchImpl = fetch, runComm
     await cloneCustomer(runtime, workspace, runCommand);
     await downloadRuntime(runtime, archivePath, fetchImpl);
     await extractRuntime(archivePath, zephyrDir);
-    await executeZephyr({ runtime, workspace, zephyrDir, startedFile, runCommand });
+    const zephyrSourceSha = await resolveZephyrSourceSha({
+      zephyrDir,
+      runtimeSha: runtime.zephyrSha,
+    });
+    onRuntimeRedeemed?.({
+      repository: runtime.repository,
+      zephyrSha: runtime.zephyrSha,
+      zephyrSourceSha,
+    });
+    await executeZephyr({
+      runtime,
+      workspace,
+      zephyrDir,
+      startedFile,
+      salesforceResultFile,
+      zephyrSourceSha,
+      runCommand,
+    });
   } catch (error) {
     await reportBootstrapIfUnstarted({ runtime, startedFile, error, core, fetchImpl });
     throw error;
@@ -372,6 +574,10 @@ async function runRuntime({ reference, payload, core, fetchImpl = fetch, runComm
 module.exports = {
   GRANT_SCHEMA,
   RUNTIME_SCHEMA,
+  SALESFORCE_RESULT_FILE,
+  SALESFORCE_RESULT_ARTIFACT,
+  SALESFORCE_RESULT_MAX_BYTES,
+  SALESFORCE_RESULT_SCHEMA,
   cleanupRuntime,
   cleanupWorkspace,
   cloneCustomer,
@@ -380,9 +586,13 @@ module.exports = {
   readDeploymentProtectionBypass,
   reportBootstrapIfUnstarted,
   reportRuntimeBootstrapFailure,
+  resolveZephyrSourceSha,
   redeemRuntime,
   requireArchiveUrl,
   runRuntime,
+  salesforceResultArtifactName,
   stageEncryptedGrant,
+  stageSalesforceResultArtifact,
+  validateSalesforceResultArtifact,
   validateRuntimeResponse,
 };

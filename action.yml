@@ -27,6 +27,28 @@ runs:
         retention-days: 1
         if-no-files-found: error
 
+    - name: Publish Salesforce operation result
+      if: ${{ always() && steps.steam.outputs.salesforce-result-ready == 'true' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.steam.outputs.salesforce-result-name }}
+        path: ${{ steps.steam.outputs.salesforce-result-path }}
+        retention-days: 7
+        if-no-files-found: error
+        overwrite: true
+
+    - name: Remove staged Salesforce operation result
+      if: ${{ always() && steps.steam.outputs.salesforce-result-root != '' }}
+      shell: bash
+      env:
+        RESULT_ROOT: ${{ steps.steam.outputs.salesforce-result-root }}
+        RUNNER_TEMP_ROOT: ${{ runner.temp }}
+      run: |
+        case "$RESULT_ROOT" in
+          "$RUNNER_TEMP_ROOT"/cresting-clouds-salesforce-result-*) rm -rf -- "$RESULT_ROOT" ;;
+          *) echo "::error::Invalid staged Salesforce result path"; exit 1 ;;
+        esac
+
     - name: Remove staged authorization grant
       if: ${{ always() && steps.steam.outputs.grant-root != '' }}
       shell: bash

@@ -60,6 +60,17 @@ incident to Nimbus for the Zephyr issue repository. After the marker exists,
 Zephyr owns reporting, preventing duplicate issues for expected or handled
 pipeline failures.
 
+For Salesforce validations and deployments, Steam also stages one private
+`salesforce-operation-result-v1.json` destination outside its disposable
+runtime directory. Zephyr writes the sanitized result there; Steam validates
+the repository, run identity, tested merge-tree provenance, and coverage
+shape, then uploads it with seven-day retention through the pinned official
+artifact action. The deterministic, run-scoped artifact name is
+`cresting-clouds-salesforce-operation-result`; a later run attempt replaces
+the prior attempt's artifact after its new payload passes validation. The upload and
+exact-prefix cleanup steps use `always()`, so structured Salesforce failures
+retain evidence without widening the canonical one-step customer workflow.
+
 ## Development
 
 ```shell
