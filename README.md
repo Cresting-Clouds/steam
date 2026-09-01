@@ -52,6 +52,25 @@ to the downloaded runtime process. This keeps environment routing out of the
 customer workflow while ensuring every Zephyr callback returns to the Nimbus
 deployment that issued the one-time reference.
 
+Steam also establishes the outer unexpected-failure boundary for the downloaded
+runtime. Zephyr writes a private marker as soon as all of its modules have loaded.
+If cloning, archive download/extraction, dependency installation, or module load
+fails before that marker exists, Steam sends a sanitized, heartbeat-authenticated
+incident to Nimbus for the Zephyr issue repository. After the marker exists,
+Zephyr owns reporting, preventing duplicate issues for expected or handled
+pipeline failures.
+
+For Salesforce validations and deployments, Steam also stages one private
+`salesforce-operation-result-v1.json` destination outside its disposable
+runtime directory. Zephyr writes the sanitized result there; Steam validates
+the repository, run identity, tested merge-tree provenance, and coverage
+shape, then uploads it with seven-day retention through the pinned official
+artifact action. The deterministic, run-scoped artifact name is
+`cresting-clouds-salesforce-operation-result`; a later run attempt replaces
+the prior attempt's artifact after its new payload passes validation. The upload and
+exact-prefix cleanup steps use `always()`, so structured Salesforce failures
+retain evidence without widening the canonical one-step customer workflow.
+
 ## Development
 
 ```shell

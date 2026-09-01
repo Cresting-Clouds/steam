@@ -7,14 +7,21 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   GRANT_SCHEMA,
+  SALESFORCE_RESULT_FILE,
+  SALESFORCE_RESULT_SCHEMA,
   cleanupWorkspace,
   cloneCustomer,
   executeZephyr,
   isSafeArchivePath,
   readDeploymentProtectionBypass,
+  resolveZephyrSourceSha,
+  reportBootstrapIfUnstarted,
+  reportRuntimeBootstrapFailure,
   redeemRuntime,
   requireArchiveUrl,
   stageEncryptedGrant,
+  stageSalesforceResultArtifact,
+  validateSalesforceResultArtifact,
   validateRuntimeResponse,
 } = require("../src/runtime");
 
@@ -66,6 +73,7 @@ test("clones from the surviving workspace parent after deleting the checkout", a
   try {
     await cloneCustomer({
       repository: "customer/repository",
+      zephyrSha: "f".repeat(40),
       customerToken: "temporary-customer-token-value",
     }, workspace, async (command, args, options) => {
       assert.equal(command, "git");
@@ -203,9 +211,12 @@ test("passes the redeemed customer credential and signed callback context into Z
         customerToken: "temporary-customer-token-value",
         callbackHost: "https://nimbus.example.invalid",
         callbackSecret: "customer-bypass-secret",
+        zephyrSha: "a".repeat(40),
       },
       workspace: "/tmp/customer-workspace",
       zephyrDir: "/tmp/zephyr-runtime",
+      startedFile: "/tmp/zephyr-started",
+      salesforceResultFile: "/tmp/salesforce-result/salesforce-operation-result-v1.json",
       runCommand: async (command, args, options) => commands.push({ command, args, options }),
     });
   } finally {
@@ -230,7 +241,108 @@ test("passes the redeemed customer credential and signed callback context into Z
     commands[1].options.env.CRESTING_CLOUDS_RUNTIME_SECRET,
     "customer-bypass-secret",
   );
+  assert.equal(
+    commands[1].options.env.CRESTING_CLOUDS_RUNTIME_STARTED_FILE,
+    "/tmp/zephyr-started",
+  );
+  assert.equal(
+    commands[1].options.env.CRESTING_CLOUDS_SALESFORCE_RESULT_FILE,
+    "/tmp/salesforce-result/salesforce-operation-result-v1.json",
+  );
+  assert.equal(commands[1].options.env.CRESTING_CLOUDS_ZEPHYR_SHA, "a".repeat(40));
+  assert.equal(commands[1].options.env.CRESTING_CLOUDS_ZEPHYR_SOURCE_SHA, "a".repeat(40));
   assert.equal(commands[1].options.env.HEARTBEAT_ID, "heartbeat-123");
+});
+
+test("reports a sanitized Zephyr issue when the runtime fails before its boundary starts", async () => {
+  const previousRunId = process.env.GITHUB_RUN_ID;
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT;
+  const previousRepository = process.env.GITHUB_REPOSITORY;
+  const previousServerUrl = process.env.GITHUB_SERVER_URL;
+  process.env.GITHUB_RUN_ID = "12345";
+  process.env.GITHUB_RUN_ATTEMPT = "2";
+  process.env.GITHUB_REPOSITORY = "customer/repository";
+  process.env.GITHUB_SERVER_URL = "https://github.com";
+  let request;
+  try {
+    const result = await reportRuntimeBootstrapFailure({
+      repository: "customer/repository",
+      heartbeatId: "heartbeat-123",
+      callbackHost: "https://nimbus.example.invalid",
+      callbackSecret: "customer-bypass-secret",
+      zephyrSha: "a".repeat(40),
+    }, new Error("bun failed at https://signed.example.invalid/archive?secret=1 with github_pat_private"), async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        async json() {
+          return { reported: true, issue_url: "https://github.com/Cresting-Clouds/zephyr/issues/123" };
+        },
+      };
+    });
+
+    assert.equal(result.sent, true);
+    assert.equal(
+      request.url.toString(),
+      "https://nimbus.example.invalid/api/product-issues/report?x-vercel-protection-bypass=customer-bypass-secret",
+    );
+    assert.equal(request.options.headers["x-vercel-protection-bypass"], "customer-bypass-secret");
+    const payload = JSON.parse(request.options.body);
+    assert.equal(payload.event_id, "steam:12345:2:heartbeat-123");
+    assert.equal(payload.source, "zephyr");
+    assert.equal(payload.suggested_owner_repo, "Cresting-Clouds/zephyr");
+    assert.equal(payload.expected, false);
+    assert.deepEqual(payload.customer, {
+      org: "customer",
+      repo: "repository",
+      full_name: "customer/repository",
+    });
+    assert.equal(payload.context.heartbeat_id, "heartbeat-123");
+    assert.equal(payload.context.workflow_run_id, "12345");
+    assert.equal(payload.context.zephyr_sha, "a".repeat(40));
+    assert.doesNotMatch(payload.message, /signed\.example\.invalid|github_pat_private/);
+  } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID;
+    else process.env.GITHUB_RUN_ID = previousRunId;
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT;
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt;
+    if (previousRepository === undefined) delete process.env.GITHUB_REPOSITORY;
+    else process.env.GITHUB_REPOSITORY = previousRepository;
+    if (previousServerUrl === undefined) delete process.env.GITHUB_SERVER_URL;
+    else process.env.GITHUB_SERVER_URL = previousServerUrl;
+  }
+});
+
+test("does not double-report after Zephyr has started its own failure boundary", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "steam-started-marker-test-"));
+  const startedFile = path.join(root, "zephyr-started");
+  await fs.writeFile(startedFile, "started\n");
+  let requests = 0;
+  const logs = [];
+  try {
+    const result = await reportBootstrapIfUnstarted({
+      runtime: {
+        repository: "customer/repository",
+        heartbeatId: "heartbeat-123",
+        callbackHost: "https://nimbus.example.invalid",
+      },
+      startedFile,
+      error: new Error("handled Zephyr failure"),
+      core: {
+        info: value => logs.push(value),
+        warning: value => logs.push(value),
+      },
+      fetchImpl: async () => {
+        requests += 1;
+        throw new Error("must not report");
+      },
+    });
+    assert.deepEqual(result, { sent: false, reason: "runtime_started_or_not_redeemed" });
+    assert.equal(requests, 0);
+    assert.deepEqual(logs, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("fails closed when the inherited secret bundle is malformed", () => {
@@ -276,9 +388,138 @@ test("stages only the signed encrypted reference for the workflow uploader", asy
   }
 });
 
+test("stages and validates a repository-bound Salesforce result artifact", async () => {
+  const runnerTemp = await fs.mkdtemp(path.join(os.tmpdir(), "steam-salesforce-result-test-"));
+  const previousServerUrl = process.env.GITHUB_SERVER_URL;
+  process.env.GITHUB_SERVER_URL = "https://github.com";
+  try {
+    const staged = await stageSalesforceResultArtifact({
+      runnerTemp,
+      runId: "33528337230",
+      runAttempt: "2",
+    });
+    assert.equal(staged.artifactName, "cresting-clouds-salesforce-operation-result");
+    assert.equal(path.basename(staged.file), SALESFORCE_RESULT_FILE);
+    assert.match(path.basename(staged.root), /^cresting-clouds-salesforce-result-/);
+    assert.equal((await fs.stat(staged.root)).mode & 0o777, 0o700);
+    assert.equal(await validateSalesforceResultArtifact({
+      staged,
+      repository: "customer/repository",
+      runId: "33528337230",
+      runAttempt: "2",
+    }), false);
+
+    const document = {
+      schema: SALESFORCE_RESULT_SCHEMA,
+      schemaVersion: 1,
+      artifactName: staged.artifactName,
+      repository: { fullName: "customer/repository" },
+      producer: {
+        component: "zephyr",
+        sha: "e".repeat(40),
+        sourceSha: "e".repeat(40),
+        runtimeSha: "f".repeat(40),
+      },
+      conclusion: "failure",
+      pipeline: { conclusion: "failure" },
+      timestamps: { completedAt: "2026-09-01T16:30:00.000Z" },
+      workflow: {
+        runId: 33528337230,
+        runAttempt: 2,
+        runUrl: "https://github.com/customer/repository/actions/runs/33528337230/attempts/2",
+      },
+      tested_snapshot: {
+        strategy: "base_plus_head_merge_worktree",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        tree_sha: "c".repeat(40),
+      },
+      source: { sha: "b".repeat(40) },
+      target: { sha: "a".repeat(40) },
+      normalized: {
+        codeCoverage: [{
+          name: "CoverageClass",
+          type: "ApexClass",
+          path: "force-app/main/default/classes/CoverageClass.cls",
+          source: "public class CoverageClass {}\n",
+          coveredLines: [1, 3],
+          coveredLinesAvailable: true,
+          uncoveredLines: [2],
+        }],
+      },
+    };
+    await fs.writeFile(staged.file, `${JSON.stringify({
+      ...document,
+      conclusion: "in_progress",
+      pipeline: { conclusion: "in_progress" },
+      timestamps: {},
+    })}\n`, { mode: 0o600 });
+    await assert.rejects(validateSalesforceResultArtifact({
+      staged,
+      repository: "customer/repository",
+      zephyrSha: "f".repeat(40),
+      zephyrSourceSha: "e".repeat(40),
+      runId: "33528337230",
+      runAttempt: "2",
+    }), /nonterminal_salesforce_result/);
+    await fs.writeFile(staged.file, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+    assert.equal(await validateSalesforceResultArtifact({
+      staged,
+      repository: "customer/repository",
+      zephyrSha: "f".repeat(40),
+      zephyrSourceSha: "e".repeat(40),
+      runId: "33528337230",
+      runAttempt: "2",
+    }), true);
+  } finally {
+    if (previousServerUrl === undefined) delete process.env.GITHUB_SERVER_URL;
+    else process.env.GITHUB_SERVER_URL = previousServerUrl;
+    await fs.rm(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("binds a distributed runtime to its immutable Zephyr source provenance", async () => {
+  const runtimeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "steam-runtime-provenance-test-"));
+  try {
+    assert.equal(await resolveZephyrSourceSha({
+      zephyrDir: runtimeRoot,
+      runtimeSha: "f".repeat(40),
+    }), "f".repeat(40));
+    await fs.writeFile(path.join(runtimeRoot, "zephyr-runtime-provenance.json"), `${JSON.stringify({
+      source_sha: "e".repeat(40),
+    })}\n`, { mode: 0o600 });
+    assert.equal(await resolveZephyrSourceSha({
+      zephyrDir: runtimeRoot,
+      runtimeSha: "f".repeat(40),
+    }), "e".repeat(40));
+  } finally {
+    await fs.rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symlink in place of the Salesforce result file", async () => {
+  const runnerTemp = await fs.mkdtemp(path.join(os.tmpdir(), "steam-salesforce-symlink-test-"));
+  try {
+    const staged = await stageSalesforceResultArtifact({ runnerTemp, runId: 1, runAttempt: 1 });
+    const outside = path.join(runnerTemp, "outside.json");
+    await fs.writeFile(outside, "{}\n", { mode: 0o600 });
+    await fs.symlink(outside, staged.file);
+    await assert.rejects(validateSalesforceResultArtifact({
+      staged,
+      repository: "customer/repository",
+      zephyrSha: "f".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+    }), /invalid_salesforce_result_file/);
+  } finally {
+    await fs.rm(runnerTemp, { recursive: true, force: true });
+  }
+});
+
 test("delegates grant upload to GitHub's pinned action and always cleans the staged file", async () => {
   const action = await fs.readFile(path.join(__dirname, "..", "action.yml"), "utf8");
   const source = await fs.readFile(path.join(__dirname, "..", "src", "index.js"), "utf8");
+  const runtimeSource = await fs.readFile(path.join(__dirname, "..", "src", "runtime.js"), "utf8");
   const packageJson = JSON.parse(await fs.readFile(path.join(__dirname, "..", "package.json"), "utf8"));
 
   assert.match(action, /id: steam/);
@@ -288,6 +529,16 @@ test("delegates grant upload to GitHub's pinned action and always cleans the sta
   assert.match(action, /if-no-files-found: error/);
   assert.match(action, /if: \$\{\{ always\(\) && steps\.steam\.outputs\.grant-root != '' \}\}/);
   assert.match(action, /"\$RUNNER_TEMP_ROOT"\/cresting-clouds-grant-\*/);
+  assert.match(action, /name: Publish Salesforce operation result/);
+  assert.match(action, /always\(\) && steps\.steam\.outputs\.salesforce-result-ready == 'true'/);
+  assert.match(action, /retention-days: 7/);
+  assert.match(action, /overwrite: true/);
+  assert.match(action, /steps\.steam\.outputs\.salesforce-result-path/);
+  assert.match(action, /"\$RUNNER_TEMP_ROOT"\/cresting-clouds-salesforce-result-\*/);
+  assert.match(source, /stageSalesforceResultArtifact/);
+  assert.match(source, /validateSalesforceResultArtifact/);
+  assert.match(runtimeSource, /async function runRuntime\(\{[\s\S]*?onRuntimeRedeemed/);
+  assert.match(runtimeSource, /onRuntimeRedeemed\?\.\(\{[\s\S]*?zephyrSourceSha/);
   assert.doesNotMatch(source, /DefaultArtifactClient|@actions\/artifact/);
   assert.equal(packageJson.dependencies["@actions/artifact"], undefined);
 });
