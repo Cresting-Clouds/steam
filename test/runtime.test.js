@@ -12,6 +12,8 @@ const {
   executeZephyr,
   isSafeArchivePath,
   readDeploymentProtectionBypass,
+  reportBootstrapIfUnstarted,
+  reportRuntimeBootstrapFailure,
   redeemRuntime,
   requireArchiveUrl,
   stageEncryptedGrant,
@@ -206,6 +208,7 @@ test("passes the redeemed customer credential and signed callback context into Z
       },
       workspace: "/tmp/customer-workspace",
       zephyrDir: "/tmp/zephyr-runtime",
+      startedFile: "/tmp/zephyr-started",
       runCommand: async (command, args, options) => commands.push({ command, args, options }),
     });
   } finally {
@@ -230,7 +233,102 @@ test("passes the redeemed customer credential and signed callback context into Z
     commands[1].options.env.CRESTING_CLOUDS_RUNTIME_SECRET,
     "customer-bypass-secret",
   );
+  assert.equal(
+    commands[1].options.env.CRESTING_CLOUDS_RUNTIME_STARTED_FILE,
+    "/tmp/zephyr-started",
+  );
   assert.equal(commands[1].options.env.HEARTBEAT_ID, "heartbeat-123");
+});
+
+test("reports a sanitized Zephyr issue when the runtime fails before its boundary starts", async () => {
+  const previousRunId = process.env.GITHUB_RUN_ID;
+  const previousRunAttempt = process.env.GITHUB_RUN_ATTEMPT;
+  const previousRepository = process.env.GITHUB_REPOSITORY;
+  const previousServerUrl = process.env.GITHUB_SERVER_URL;
+  process.env.GITHUB_RUN_ID = "12345";
+  process.env.GITHUB_RUN_ATTEMPT = "2";
+  process.env.GITHUB_REPOSITORY = "customer/repository";
+  process.env.GITHUB_SERVER_URL = "https://github.com";
+  let request;
+  try {
+    const result = await reportRuntimeBootstrapFailure({
+      repository: "customer/repository",
+      heartbeatId: "heartbeat-123",
+      callbackHost: "https://nimbus.example.invalid",
+      callbackSecret: "customer-bypass-secret",
+      zephyrSha: "a".repeat(40),
+    }, new Error("bun failed at https://signed.example.invalid/archive?secret=1 with github_pat_private"), async (url, options) => {
+      request = { url, options };
+      return {
+        ok: true,
+        async json() {
+          return { reported: true, issue_url: "https://github.com/Cresting-Clouds/zephyr/issues/123" };
+        },
+      };
+    });
+
+    assert.equal(result.sent, true);
+    assert.equal(
+      request.url.toString(),
+      "https://nimbus.example.invalid/api/product-issues/report?x-vercel-protection-bypass=customer-bypass-secret",
+    );
+    assert.equal(request.options.headers["x-vercel-protection-bypass"], "customer-bypass-secret");
+    const payload = JSON.parse(request.options.body);
+    assert.equal(payload.event_id, "steam:12345:2:heartbeat-123");
+    assert.equal(payload.source, "zephyr");
+    assert.equal(payload.suggested_owner_repo, "Cresting-Clouds/zephyr");
+    assert.equal(payload.expected, false);
+    assert.deepEqual(payload.customer, {
+      org: "customer",
+      repo: "repository",
+      full_name: "customer/repository",
+    });
+    assert.equal(payload.context.heartbeat_id, "heartbeat-123");
+    assert.equal(payload.context.workflow_run_id, "12345");
+    assert.equal(payload.context.zephyr_sha, "a".repeat(40));
+    assert.doesNotMatch(payload.message, /signed\.example\.invalid|github_pat_private/);
+  } finally {
+    if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID;
+    else process.env.GITHUB_RUN_ID = previousRunId;
+    if (previousRunAttempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT;
+    else process.env.GITHUB_RUN_ATTEMPT = previousRunAttempt;
+    if (previousRepository === undefined) delete process.env.GITHUB_REPOSITORY;
+    else process.env.GITHUB_REPOSITORY = previousRepository;
+    if (previousServerUrl === undefined) delete process.env.GITHUB_SERVER_URL;
+    else process.env.GITHUB_SERVER_URL = previousServerUrl;
+  }
+});
+
+test("does not double-report after Zephyr has started its own failure boundary", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "steam-started-marker-test-"));
+  const startedFile = path.join(root, "zephyr-started");
+  await fs.writeFile(startedFile, "started\n");
+  let requests = 0;
+  const logs = [];
+  try {
+    const result = await reportBootstrapIfUnstarted({
+      runtime: {
+        repository: "customer/repository",
+        heartbeatId: "heartbeat-123",
+        callbackHost: "https://nimbus.example.invalid",
+      },
+      startedFile,
+      error: new Error("handled Zephyr failure"),
+      core: {
+        info: value => logs.push(value),
+        warning: value => logs.push(value),
+      },
+      fetchImpl: async () => {
+        requests += 1;
+        throw new Error("must not report");
+      },
+    });
+    assert.deepEqual(result, { sent: false, reason: "runtime_started_or_not_redeemed" });
+    assert.equal(requests, 0);
+    assert.deepEqual(logs, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("fails closed when the inherited secret bundle is malformed", () => {

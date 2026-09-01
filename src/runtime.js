@@ -215,7 +215,7 @@ async function extractRuntime(archivePath, destination) {
   await fs.access(path.join(destination, "package-lock.json"));
 }
 
-async function executeZephyr({ runtime, workspace, zephyrDir, runCommand = run }) {
+async function executeZephyr({ runtime, workspace, zephyrDir, startedFile, runCommand = run }) {
   await runCommand("bun", ["install", "--frozen-lockfile", "--production"], {
     cwd: zephyrDir,
     env: { ...process.env, CI: "true" },
@@ -232,9 +232,93 @@ async function executeZephyr({ runtime, workspace, zephyrDir, runCommand = run }
       GH_TOKEN: runtime.customerToken,
       CRESTING_CLOUDS_RUNTIME_HOST: runtime.callbackHost,
       CRESTING_CLOUDS_RUNTIME_SECRET: runtime.callbackSecret || "",
+      CRESTING_CLOUDS_RUNTIME_STARTED_FILE: startedFile || "",
       HEARTBEAT_ID: runtime.heartbeatId,
     },
   });
+}
+
+function publicFailureMessage(error) {
+  const name = error && typeof error.name === "string" ? error.name : "Error";
+  const message = error && typeof error.message === "string" ? error.message : String(error || "unknown failure");
+  return `${name}: ${message}`
+    .replace(/https?:\/\/\S+/gi, "<url>")
+    .replace(/(?:gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g, "<token>")
+    .replace(/\s+/g, " ")
+    .slice(0, 1000);
+}
+
+async function reportRuntimeBootstrapFailure(runtime, error, fetchImpl = fetch) {
+  const [org, repo] = runtime.repository.split("/");
+  const endpoint = new URL("/api/product-issues/report", runtime.callbackHost);
+  const headers = { "content-type": "application/json" };
+  if (runtime.callbackSecret) {
+    headers["x-vercel-protection-bypass"] = runtime.callbackSecret;
+    endpoint.searchParams.set("x-vercel-protection-bypass", runtime.callbackSecret);
+  }
+  const runId = String(process.env.GITHUB_RUN_ID || "unknown");
+  const runAttempt = String(process.env.GITHUB_RUN_ATTEMPT || "1");
+  const message = publicFailureMessage(error);
+  const payload = {
+    event_id: `steam:${runId}:${runAttempt}:${runtime.heartbeatId}`,
+    source: "zephyr",
+    suggested_owner_repo: "Cresting-Clouds/zephyr",
+    classification: "runtime_bootstrap_failure",
+    criticality: "sev2",
+    title: "Zephyr runtime failed before its failure boundary started",
+    message,
+    phase: "runtime.bootstrap",
+    task: "runtime-bootstrap",
+    expected: false,
+    customer: { org, repo, full_name: runtime.repository },
+    context: {
+      heartbeat_id: runtime.heartbeatId,
+      org,
+      repo,
+      workflow_run_id: runId,
+      workflow_run_attempt: runAttempt,
+      run_url: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+        : undefined,
+      zephyr_sha: runtime.zephyrSha,
+    },
+  };
+
+  try {
+    const response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) return { sent: false, reason: `report_failed_${response.status}` };
+    const result = await response.json().catch(() => undefined);
+    return result?.reported === true
+      ? { sent: true, result }
+      : { sent: false, reason: result?.reason || "not_reported" };
+  } catch (reportError) {
+    return { sent: false, reason: publicFailureMessage(reportError) };
+  }
+}
+
+async function fileExists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function reportBootstrapIfUnstarted({ runtime, startedFile, error, core, fetchImpl = fetch }) {
+  if (!runtime || await fileExists(startedFile)) {
+    return { sent: false, reason: "runtime_started_or_not_redeemed" };
+  }
+
+  const report = await reportRuntimeBootstrapFailure(runtime, error, fetchImpl);
+  if (report.sent) core.info("Zephyr bootstrap product issue reported.");
+  else core.warning(`Zephyr bootstrap product issue was not reported: ${report.reason}`);
+  return report;
 }
 
 async function cleanupWorkspace(workspace) {
@@ -267,14 +351,19 @@ async function runRuntime({ reference, payload, core, fetchImpl = fetch, runComm
   const tempRoot = await fs.mkdtemp(path.join(runnerTemp, "cresting-clouds-runtime-"));
   const archivePath = path.join(tempRoot, "runtime.tar.gz");
   const zephyrDir = path.join(tempRoot, "runtime");
+  const startedFile = path.join(tempRoot, "zephyr-started");
+  let runtime;
   try {
-    const runtime = await redeemRuntime({ reference, payload, core, fetchImpl });
+    runtime = await redeemRuntime({ reference, payload, core, fetchImpl });
     core.setSecret(runtime.customerToken);
     core.setSecret(runtime.archiveUrl);
     await cloneCustomer(runtime, workspace, runCommand);
     await downloadRuntime(runtime, archivePath, fetchImpl);
     await extractRuntime(archivePath, zephyrDir);
-    await executeZephyr({ runtime, workspace, zephyrDir, runCommand });
+    await executeZephyr({ runtime, workspace, zephyrDir, startedFile, runCommand });
+  } catch (error) {
+    await reportBootstrapIfUnstarted({ runtime, startedFile, error, core, fetchImpl });
+    throw error;
   } finally {
     await cleanupRuntime({ workspace, tempRoot });
   }
@@ -289,6 +378,8 @@ module.exports = {
   executeZephyr,
   isSafeArchivePath,
   readDeploymentProtectionBypass,
+  reportBootstrapIfUnstarted,
+  reportRuntimeBootstrapFailure,
   redeemRuntime,
   requireArchiveUrl,
   runRuntime,

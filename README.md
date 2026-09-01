@@ -52,6 +52,14 @@ to the downloaded runtime process. This keeps environment routing out of the
 customer workflow while ensuring every Zephyr callback returns to the Nimbus
 deployment that issued the one-time reference.
 
+Steam also establishes the outer unexpected-failure boundary for the downloaded
+runtime. Zephyr writes a private marker as soon as all of its modules have loaded.
+If cloning, archive download/extraction, dependency installation, or module load
+fails before that marker exists, Steam sends a sanitized, heartbeat-authenticated
+incident to Nimbus for the Zephyr issue repository. After the marker exists,
+Zephyr owns reporting, preventing duplicate issues for expected or handled
+pipeline failures.
+
 ## Development
 
 ```shell
