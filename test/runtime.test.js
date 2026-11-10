@@ -315,8 +315,8 @@ test("reports a sanitized Zephyr issue when the runtime fails before its boundar
 
 for (const [format, token] of [
   ["classic", `ghs_${"A".repeat(36)}`],
-  ["stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"synthetic_payload-_".repeat(30)}.synthetic_signature-_`],
-  ["long stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"long_payload-_".repeat(120)}.long_signature-_`],
+  ["stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"synthetic_payload-_".repeat(30)}.synthetic_signature_-`],
+  ["long stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"long_payload-_".repeat(120)}.long_signature_-`],
 ]) {
   test(`fully redacts ${format} installation tokens from bootstrap reports and report errors`, async () => {
     const runtime = {
