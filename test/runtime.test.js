@@ -313,6 +313,35 @@ test("reports a sanitized Zephyr issue when the runtime fails before its boundar
   }
 });
 
+for (const [format, token] of [
+  ["classic", `ghs_${"A".repeat(36)}`],
+  ["stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"synthetic_payload-_".repeat(30)}.synthetic_signature-_`],
+  ["long stateless", `ghs_2331406_eyJhbGciOiJSUzI1NiJ9.${"long_payload-_".repeat(120)}.long_signature-_`],
+]) {
+  test(`fully redacts ${format} installation tokens from bootstrap reports and report errors`, async () => {
+    const runtime = {
+      repository: "customer/repository",
+      heartbeatId: "heartbeat-token-redaction",
+      callbackHost: "https://nimbus.example.invalid",
+      zephyrSha: "a".repeat(40),
+    };
+    let payload;
+    const result = await reportRuntimeBootstrapFailure(runtime,
+      new Error(`Provider rejected (${token}); retry`), async (_url, options) => {
+        payload = JSON.parse(options.body);
+        return { ok: true, json: async () => ({ reported: true }) };
+      });
+    assert.equal(result.sent, true);
+    assert.equal(payload.message, "Error: Provider rejected (<token>); retry");
+    for (const segment of token.split(".")) assert.equal(JSON.stringify(payload).includes(segment), false);
+
+    const failedReport = await reportRuntimeBootstrapFailure(runtime, new Error("original failure"), async () => {
+      throw new Error(`Report rejected (${token}); retry`);
+    });
+    assert.deepEqual(failedReport, { sent: false, reason: "Error: Report rejected (<token>); retry" });
+  });
+}
+
 test("does not double-report after Zephyr has started its own failure boundary", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "steam-started-marker-test-"));
   const startedFile = path.join(root, "zephyr-started");

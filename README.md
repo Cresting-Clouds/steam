@@ -60,6 +60,18 @@ incident to Nimbus for the Zephyr issue repository. After the marker exists,
 Zephyr owns reporting, preventing duplicate issues for expected or handled
 pipeline failures.
 
+Bootstrap reports redact both classic `ghs_` installation tokens and longer
+stateless installation tokens as complete opaque strings, including dots,
+underscores and trailing hyphens. Redaction precedes the message length bound
+and also protects errors raised while publishing an incident. Tests capture
+the actual outgoing JSON with unregistered synthetic credentials, check exact
+sanitized text and reject any leftover payload/signature segment. No token
+claims are decoded and no fixed installation-token length is required.
+GitHub's [completed token rollout](https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/)
+does not require an issuance override header; that temporary header retires
+on November 30, 2026. This correction changes neither Actions OIDC nor webhook
+authorization, token permissions, customer workflow inputs or runtime cleanup.
+
 For Salesforce validations and deployments, Steam also stages one private
 `salesforce-operation-result-v1.json` destination outside its disposable
 runtime directory. Zephyr writes the sanitized result there; Steam validates
