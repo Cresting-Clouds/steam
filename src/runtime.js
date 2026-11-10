@@ -420,7 +420,8 @@ function publicFailureMessage(error) {
   const message = error && typeof error.message === "string" ? error.message : String(error || "unknown failure");
   return `${name}: ${message}`
     .replace(/https?:\/\/\S+/gi, "<url>")
-    .replace(/(?:gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g, "<token>")
+    // Installation tokens are opaque; consume the complete stateless token before truncation.
+    .replace(/(?:ghs_[A-Za-z0-9._-]+|gh[opu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)/g, "<token>")
     .replace(/\s+/g, " ")
     .slice(0, 1000);
 }
